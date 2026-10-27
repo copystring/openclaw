@@ -179,6 +179,7 @@ export async function admitChatSend(params: ChatSendAdmissionParams) {
   let reservationSuperseded = false;
   let supersedingResult: DedupeEntry | undefined;
   let assertSourceAuthority: (() => void) | undefined = params.assertCurrent;
+  let assertAcceptedInputAuthority: (() => void) | undefined;
   const sessionTarget = captureSessionTarget({
     storeScope: storePath,
     sessionKey,
@@ -550,6 +551,7 @@ export async function admitChatSend(params: ChatSendAdmissionParams) {
   }
   assertSourceAuthority = () => {
     capturedOperator.authority?.assertCurrent();
+    assertAcceptedInputAuthority?.();
     assertSessionTargetCurrent();
     if (!gatewayWorkAdmission?.isActive()) {
       throw new Error("Chat source preparation custody ended");
@@ -595,6 +597,8 @@ export async function admitChatSend(params: ChatSendAdmissionParams) {
       target: session.sessionTarget,
       storePath,
       sourceRef,
+      lifecycleRevision:
+        admittedSessionEntry?.lifecycleRevision ?? initialSessionEntry?.lifecycleRevision,
       isActive: () => acquiredGatewayWorkAdmission.isActive(),
     },
   });
@@ -632,6 +636,12 @@ export async function admitChatSend(params: ChatSendAdmissionParams) {
       admittedSessionId,
       ...(expectedActiveReplyOperation ? { expectedActiveReplyOperation } : {}),
       sourceRef,
+      bindAcceptedInputAuthority: (assertCurrent: () => void) => {
+        assertAcceptedInputAuthority = () => {
+          retainedWork.assertCommittedDestinationCurrent();
+          assertCurrent();
+        };
+      },
       onSessionPrepared,
       initialSessionEntry,
       admittedSessionEntry,
@@ -657,6 +667,7 @@ export async function admitChatSend(params: ChatSendAdmissionParams) {
       rejectSessionRoutingChanged,
       releaseSourceWorkAdmission: retainedWork.release,
       retainGatewayWorkAdmission: retainedWork.retain,
+      recordFailureNotice: retainedWork.recordFailureNotice,
       withInputCommitPublication: retainedWork.withInputCommitPublication,
       acquireInputActor: () => retainedWork.acquireInputActor(),
       setPendingInputCleanup: retainedWork.setPendingInputCleanup,

@@ -286,7 +286,7 @@ describe("worker placement dispatch", () => {
     await harness.service.reconcile();
 
     expect(harness.placements.current()).toMatchObject({
-      state: "failed",
+      state: "reclaimed",
       turnClaim: null,
       workspaceBaseManifestRef: harness.reconciledManifestRef,
     });
