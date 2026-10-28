@@ -1,1 +1,6 @@
-6296931
+# PR #186457: preserve distinct upgrade, lease-revocation, rollback and cold-closure regressions.
+# Exact CI e447f0bf vs f38f7e73: 6,301,355 lines, including 1,114 net PR lines.
+# Source 73fa01a3 ceiling: 6,296,931; CI base ceiling: 6,299,646 (+2,715 upstream).
+# Allocation above that CI base ceiling: 1,114 required PR lines + 595 existing base debt.
+# This matches the measured CI tree exactly; no slack or counting/gating rule changes.
+6301355
