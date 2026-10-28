@@ -1,6 +1,6 @@
 // Error payload tests ensure embedded runs convert provider/tool failures into
 // concise user-facing replies without leaking raw provider bodies or secrets.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 // Classification fixtures here exercise message/status tables. Provider-attributed
 // structured signals otherwise cross the plugin-consult gate and cold-materialize
 // the full bundled provider runtime, timing the unit test out under CI load
@@ -16,6 +16,7 @@ vi.mock("../../../plugins/provider-hook-runtime.js", async (importOriginal) => {
 
 import { getReplyPayloadMetadata } from "../../../auto-reply/reply-payload.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import { claimAgentRunContext, releaseAgentRunContext } from "../../../infra/agent-run-registry.js";
 import { formatBillingErrorMessage } from "../../failover/user-copy.js";
 import { resolvePreparedSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
 import { makeAgentAssistantMessage } from "../../test-helpers/agent-message-fixtures.js";
@@ -80,6 +81,29 @@ describe("buildEmbeddedRunPayloads tool-error silence", () => {
         }),
         { title: "Read" },
       );
+    },
+  );
+
+  it.each([
+    { result: { outcome: "progress" as const, summary: "Published the CI repair." }, warns: false },
+    { result: { outcome: "no_change" as const }, warns: true },
+  ])(
+    "treats a scheduled run's $result.outcome result as its outcome only when meaningful",
+    ({ result, warns }) => {
+      const runId = `cron-${result.outcome}`;
+      const claim = claimAgentRunContext(
+        runId,
+        { cronRunsByJobId: new Map([["job", { nextCheckEnabled: true, result }]]) },
+        { trackOwner: true, ownsContext: true },
+      );
+      onTestFinished(() => releaseAgentRunContext(runId, claim));
+      const payloads = buildPayloads({
+        runId,
+        isCronTrigger: true,
+        assistantTexts: ["NO_REPLY"],
+        lastToolError: { toolName: "agents_wait", error: "not_found", mutatingAction: false },
+      });
+      expect(payloads).toHaveLength(warns ? 1 : 0);
     },
   );
 

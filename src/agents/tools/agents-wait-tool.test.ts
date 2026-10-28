@@ -810,6 +810,21 @@ describe("agents_wait", () => {
     expect(isToolResultError(result)).toBe(true);
   });
 
+  it("points an owned announcing child to its completion message instead of not_found", async () => {
+    records.set("announcing", { ...collectorRun("announcing", MAIN), collect: undefined });
+    records.set("foreign", { ...collectorRun("foreign", "agent:other:main"), collect: undefined });
+
+    await expect(executeWait(["announcing"])).rejects.toThrow(
+      "announcing will report back to this session as a completion message",
+    );
+    expect((await executeWait(["foreign"])).details).toEqual({
+      completed: [],
+      pending: [],
+      errors: [{ runId: "foreign", error: "not_found" }],
+      success: false,
+    });
+  });
+
   it.each([
     { ids: [" ", "\t"], timeoutSeconds: 0, error: "at least one non-empty run id" },
     { timeoutSeconds: 0, error: "array of run id strings" },
