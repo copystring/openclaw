@@ -422,12 +422,10 @@ export async function processCompletionsStream(
       choice?.finish_reason ||
       (rawChoiceDelta &&
         (rawChoiceDelta.tool_calls?.length || hasOpenAICompletionsDeltaContent(rawChoiceDelta))) ||
-      [
-        usage?.prompt_tokens,
-        usage?.completion_tokens,
-        usage?.total_tokens,
-        usage?.completion_tokens_details?.reasoning_tokens,
-      ].some((value) => asNonNegativeFiniteNumber(value) !== undefined),
+      asNonNegativeFiniteNumber(usage?.prompt_tokens) !== undefined ||
+      asNonNegativeFiniteNumber(usage?.completion_tokens) !== undefined ||
+      asNonNegativeFiniteNumber(usage?.total_tokens) !== undefined ||
+      asNonNegativeFiniteNumber(usage?.completion_tokens_details?.reasoning_tokens) !== undefined,
     );
     if (hasResponseEvidence) {
       output.responseId ||= chunk.id;
