@@ -71,8 +71,8 @@ async function historyFixture() {
             pr.headSha = await remoteHead();
           }
           return commandResult(output);
-        } catch {
-          return commandResult("", 1);
+        } catch (error) {
+          return { ...commandResult("", 1), stderr: Buffer.from((error as Error).message) };
         }
       }
       if (argv.includes("state=all")) {
@@ -316,6 +316,23 @@ describe("GitHub publication branch history", () => {
     await f.git("add", "artifact.txt");
     await f.write("unstaged after divergence\n");
     await f.rejected("diverged", "push_rejected", "published head");
+  });
+
+  it.each([
+    ["permission", "Permission to openclaw/openclaw.git denied to roboclaw-bot.", "write access"],
+    ["rule", "GH013: Repository rule violations found", "branch rules"],
+  ])("settles a %s push rejection that left the remote unchanged", async (_, reason, action) => {
+    const hook = path.join(f.remote, "hooks", "pre-receive");
+    await fs.writeFile(hook, `#!/bin/sh\necho "${reason}" >&2\nexit 1\n`, { mode: 0o755 });
+    expect(await f.publish("rejected-push")).toMatchObject({
+      status: "failed",
+      code: "push_rejected",
+      nextAction: expect.stringMatching(
+        new RegExp(`openclaw/openclaw.*nothing was pushed.*${action}`),
+      ),
+    });
+    expect(await f.remoteHead()).toBe("");
+    expect(f.calls.filter((args) => args.includes("POST"))).toEqual([]);
   });
 
   it("retains identity-change semantics when identity is revoked during remote observation", async () => {
