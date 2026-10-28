@@ -69,9 +69,11 @@ async function connectDeferredRelay(
 
 describe("Playwright CDP initialization diagnostics", () => {
   it("reattaches one selected relay target on the existing transport and coalesces callers", async () => {
+    const sendWire = vi.fn((_message: object) => {});
+    const closeWire = vi.fn();
     const wire: import("playwright-core").ConnectOverCDPTransport = {
-      send: vi.fn(),
-      close: vi.fn(),
+      send: sendWire,
+      close: closeWire,
     };
     const browser = { close: vi.fn() } as unknown as import("playwright-core").Browser;
     const connected = await connectDeferredRelay(wire, browser);
@@ -95,7 +97,7 @@ describe("Playwright CDP initialization diagnostics", () => {
 
     const first = reattachRelayPage(browser, "BUSY", 1000);
     const second = reattachRelayPage(browser, "BUSY", 1000);
-    const commands = vi.mocked(wire.send).mock.calls.map(
+    const commands = vi.mocked(sendWire).mock.calls.map(
       ([message]) =>
         message as {
           id: number;
@@ -115,7 +117,7 @@ describe("Playwright CDP initialization diagnostics", () => {
     wire.onmessage?.({ id: detach!.id, result: {} });
     await Promise.resolve();
     const attach = vi
-      .mocked(wire.send)
+      .mocked(sendWire)
       .mock.calls.map(([message]) => message as { id: number; method: string; params?: object })
       .find((command) => command.method === "Target.attachToTarget");
     expect(attach).toMatchObject({ params: { targetId: "BUSY", flatten: true } });
@@ -130,20 +132,22 @@ describe("Playwright CDP initialization diagnostics", () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
     expect(connected.assertCurrent).toHaveBeenCalled();
-    expect(wire.close).not.toHaveBeenCalled();
+    expect(closeWire).not.toHaveBeenCalled();
     expect(connectOverCdpSpy).toHaveBeenCalledOnce();
   });
 
   it("rejects CDP errors and can continue after detach succeeds but attach times out", async () => {
+    const sendWire = vi.fn((_message: object) => {});
+    const closeWire = vi.fn();
     const wire: import("playwright-core").ConnectOverCDPTransport = {
-      send: vi.fn(),
-      close: vi.fn(),
+      send: sendWire,
+      close: closeWire,
     };
     const browser = { close: vi.fn() } as unknown as import("playwright-core").Browser;
     await connectDeferredRelay(wire, browser);
     const recovery = reattachRelayPage(browser, "BUSY", 10);
     const detach = vi
-      .mocked(wire.send)
+      .mocked(sendWire)
       .mock.calls.map(([message]) => message as { id: number; method: string })
       .find((command) => command.method === "Target.detachFromTarget");
     wire.onmessage?.({
@@ -151,16 +155,15 @@ describe("Playwright CDP initialization diagnostics", () => {
       error: { message: "Target session retired" },
     });
     await expect(recovery).rejects.toThrow("Target session retired");
-    expect(wire.close).not.toHaveBeenCalled();
+    expect(closeWire).not.toHaveBeenCalled();
 
     vi.useFakeTimers();
     const timedOut = reattachRelayPage(browser, "BUSY", 10);
     const timedOutResult = expect(timedOut).rejects.toBeInstanceOf(RelayPageRecoveryTimeoutError);
     const secondDetach = vi
-      .mocked(wire.send)
+      .mocked(sendWire)
       .mock.calls.map(([message]) => message as { id: number; method: string; params?: object })
-      .filter((command) => command.method === "Target.detachFromTarget")
-      .at(-1)!;
+      .findLast((command) => command.method === "Target.detachFromTarget")!;
     wire.onmessage?.({
       method: "Target.detachedFromTarget",
       params: { sessionId: "old-session" },
@@ -171,12 +174,12 @@ describe("Playwright CDP initialization diagnostics", () => {
 
     const retry = reattachRelayPage(browser, "BUSY", 1000, true);
     const commands = vi
-      .mocked(wire.send)
+      .mocked(sendWire)
       .mock.calls.map(([message]) => message as { id: number; method: string; params?: object });
     expect(commands.filter((command) => command.method === "Target.detachFromTarget")).toHaveLength(
       2,
     );
-    const attach = commands.filter((command) => command.method === "Target.attachToTarget").at(-1)!;
+    const attach = commands.findLast((command) => command.method === "Target.attachToTarget")!;
     wire.onmessage?.({
       method: "Target.attachedToTarget",
       params: {
