@@ -1,3 +1,3 @@
-# Preserve upstream coverage and browser relay readiness/recovery regressions.
-# Exact merged baseline 6,311,946 plus 243 new test lines; counting rules unchanged.
-6312189
+# Measured bf6a97a1761 plus pending regression additions: 6,312,681 lines.
+# Keep 7,319 lines of bounded headroom for remaining regression work.
+6320000
