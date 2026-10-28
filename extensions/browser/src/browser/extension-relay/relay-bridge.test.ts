@@ -617,29 +617,59 @@ it("publishes a shared recovered attachment to every waiting auto-attach client"
   expect(attached(first)).toHaveLength(firstAttachedEventCount);
 });
 
-it("skips a permanent Chrome refusal but retries that tab on the next enumeration", async () => {
-  let refused = true;
+it.each([
+  "Debugger acquisition failed: Error: native target unavailable; cleanup incomplete: Error: Cannot access a chrome-extension:// URL of different extension",
+  "Debugger cleanup incomplete: Error: native detach failed",
+])("does not hide transient attachment failures behind a cleanup error: %s", async (failure) => {
   const { bridge } = readyBridge(
     (message) =>
-      message.type === "attach" && message.tabId === 2 && refused
-        ? {
-            type: "error",
-            seq: message.seq,
-            message: "The extensions gallery cannot be scripted.",
-          }
+      message.type === "attach" && message.tabId === 2
+        ? { type: "error", seq: message.seq, message: failure }
         : replyFor(message),
-    [
-      ...defaultTabs(),
-      tab(2, "https://chromewebstore.google.com/detail/x/abc", "Chrome Web Store"),
-    ],
+    [...defaultTabs(), tab(2, "https://other.example", "Other")],
   );
   const { client, cdp } = connectClient(bridge);
   await dispatch(cdp, 1, "Target.getTargets");
-  expect(response(client, 1)).toMatchObject(targetInfos("target-1"));
-  refused = false;
-  await dispatch(cdp, 2, "Target.getTargets");
-  expect(response(client, 2)).toMatchObject(targetInfos("target-1", "target-2"));
+  expect(response(client, 1)).toHaveProperty("error.message", "Target identities are unavailable");
 });
+
+it.each(
+  [
+    "The extensions gallery cannot be scripted.",
+    "Cannot access a chrome:// URL",
+    "Cannot access a chrome-extension:// URL of different extension",
+  ].flatMap((reason) => [
+    reason,
+    `Debugger acquisition failed: Error: ${reason}; cleanup incomplete: Error: ${reason}`,
+    `Debugger acquisition failed: Error: ${reason}; cleanup incomplete: Error: native detach failed`,
+    `Debugger cleanup incomplete: Error: ${reason}`,
+  ]),
+)(
+  "skips a permanent Chrome refusal and retries it on the next enumeration: %s",
+  async (failure) => {
+    let refused = true;
+    const { bridge } = readyBridge(
+      (message) =>
+        message.type === "attach" && message.tabId === 2 && refused
+          ? {
+              type: "error",
+              seq: message.seq,
+              message: failure,
+            }
+          : replyFor(message),
+      [
+        ...defaultTabs(),
+        tab(2, "https://chromewebstore.google.com/detail/x/abc", "Chrome Web Store"),
+      ],
+    );
+    const { client, cdp } = connectClient(bridge);
+    await dispatch(cdp, 1, "Target.getTargets");
+    expect(response(client, 1)).toMatchObject(targetInfos("target-1"));
+    refused = false;
+    await dispatch(cdp, 2, "Target.getTargets");
+    expect(response(client, 2)).toMatchObject(targetInfos("target-1", "target-2"));
+  },
+);
 it.each(["attach", "createTab"])(
   "waits for %s and native detach before closing",
   async (operation) => {

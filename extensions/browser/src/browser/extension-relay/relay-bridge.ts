@@ -27,6 +27,27 @@ const BROWSER_TARGET_ID = "openclaw-extension-relay";
 /** Playwright requires every attached page target to identify its browser context. */
 const BROWSER_CONTEXT_ID = "openclaw-extension-context";
 
+function isPermanentChromePageRefusal(error: unknown): error is Error {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return [
+    "The extensions gallery cannot be scripted.",
+    "Cannot access a chrome:// URL",
+    "Cannot access a chrome-extension:// URL of different extension",
+  ].some(
+    (reason) =>
+      error.message === reason ||
+      // Store extensions stringify the acquisition cause when native cleanup
+      // also fails. Keep that cleanup debt, but do not let its envelope hide
+      // Chrome's refusal from discovery. A refusal only in cleanup is not enough.
+      error.message.startsWith(
+        `Debugger acquisition failed: Error: ${reason}; cleanup incomplete: `,
+      ) ||
+      error.message === `Debugger cleanup incomplete: Error: ${reason}`,
+  );
+}
+
 type BridgeSocket = {
   send: (data: string) => void;
   close: (code?: number, reason?: string) => void;
@@ -628,12 +649,7 @@ export class ExtensionRelayBridge {
           } catch (error) {
             // Exact Chromium page restrictions, not attachment conflicts,
             // permission failures, timeouts, or retired tab generations.
-            if (
-              error instanceof Error &&
-              (error.message === "The extensions gallery cannot be scripted." ||
-                error.message === "Cannot access a chrome:// URL" ||
-                error.message === "Cannot access a chrome-extension:// URL of different extension")
-            ) {
+            if (isPermanentChromePageRefusal(error)) {
               skipped.set(tab, { url, reason: error.message });
             }
           }
