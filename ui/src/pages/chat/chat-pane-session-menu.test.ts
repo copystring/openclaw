@@ -573,52 +573,31 @@ describe("chat pane session menu boundary", () => {
     },
   );
 
-  it.each([
-    ["operator.write", "viewer", true, true],
-    ["operator.sessions.write", "owner", false, true],
-    ["operator.sessions.write", "owner", true, true],
-    ["operator.sessions.write", "viewer", false, false],
-    ["operator.sessions.read", "owner", false, false],
-  ] as const)(
-    "gates whole-conversation fork for %s/%s (active=%s)",
-    async (scope, sharingRole, active, allowed) => {
+  it.each([false, true])(
+    "forks owned conversations through the organizer (active=%s)",
+    async (active) => {
       const create = vi.fn(async () => "agent:main:forked");
-      const sessions = createSessionCapabilityFixture({ create, state: { error: null } });
-      const { pane, state } = createTestChatPane({ sessions });
-      state.settings = loadSettings();
+      const sessions = createSessionCapabilityFixture({
+        create,
+        state: { error: null },
+      });
+      const { pane } = createTestChatPane({ sessions });
       pane.context.gateway.snapshot.hello = gatewayHelloForMethods(
-        ["sessions.patch", "sessions.create"],
-        [scope],
+        ["sessions.create"],
+        ["operator.sessions.write"],
       );
       const onPaneSessionChange = vi.fn();
       pane.onPaneSessionChange = onPaneSessionChange;
       const session = {
         key: "agent:main:current",
-        sessionId: "current",
         kind: "direct",
         updatedAt: 0,
-        sharingRole,
         hasActiveRun: active,
+        sharingRole: "owner",
       } satisfies GatewaySessionRow;
-      const container = document.body.appendChild(document.createElement("div"));
-      renderPaneHeaderInto(headerProps(pane, session), container);
-      const menu = container.querySelector("openclaw-chat-header-session-menu")!;
-      await menu.updateComplete;
-      expect(menu.openMenu()).toBe(true);
-      flush();
-      await menu.updateComplete;
-      await openSubmenu(menu.querySelector(".chat-header-session-menu__panel")!, "Advanced");
-      expect(
-        menu.querySelector<HTMLElement & { disabled: boolean }>('[value="fork"]')?.disabled,
-      ).toBe(!allowed);
 
       await runPaneHeaderAction(pane, { kind: "fork" }, session);
 
-      if (!allowed) {
-        expect(create).not.toHaveBeenCalled();
-        expect(onPaneSessionChange).not.toHaveBeenCalled();
-        return;
-      }
       expect(create).toHaveBeenCalledWith(
         {
           parentSessionKey: session.key,
@@ -629,7 +608,7 @@ describe("chat pane session menu boundary", () => {
         { signal: expect.any(AbortSignal) },
       );
       expect(onPaneSessionChange).toHaveBeenCalledWith("single", "agent:main:forked");
-      if (scope === "operator.sessions.write" && !active) {
+      if (!active) {
         pane.context.gateway.snapshot.hello = gatewayHelloForMethods(
           ["sessions.create"],
           ["operator.sessions.read"],

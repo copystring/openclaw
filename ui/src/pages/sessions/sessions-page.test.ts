@@ -725,6 +725,30 @@ describe("sessions page lifecycle", () => {
     expect(connection.setSessionKey).not.toHaveBeenCalled();
     expect(context.navigate).not.toHaveBeenCalled();
   });
+
+  it.each(["operator.write", "operator.sessions.write"])(
+    "forks an active owned session with %s",
+    async (scope) => {
+      const { page, sessions, connection } = await mountMutation({
+        createResult: vi.fn<SessionCapability["createResult"]>(async () => ({
+          key: "active-fork",
+          entry: { sessionId: "active-fork-id" },
+          initialRun: { status: "idle" },
+        })),
+      });
+      connection.emit({ hello: gatewayHelloForMethods(["sessions.create"], [scope]) });
+      page.result = sessionsResult([sessionRow("main", { key: "main", sharingRole: "owner" })], 1);
+      await page.forkSession("main", true);
+      expect(sessions.createResult).toHaveBeenCalledWith(
+        {
+          parentSessionKey: "main",
+          fork: true,
+          forkFrom: "last-completed",
+        },
+        { signal: expect.any(AbortSignal) },
+      );
+    },
+  );
 });
 
 describe("sessions page new group", () => {

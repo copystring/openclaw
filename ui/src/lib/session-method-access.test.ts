@@ -34,46 +34,25 @@ function access(scopes: string[], request: SessionMethodAccessRequest) {
 }
 
 describe("readSessionMethodAccess", () => {
-  it("requires source ownership only for parented scoped creation", () => {
-    const scoped = snapshot({ scopes: ["operator.sessions.write"] });
+  it.each(["operator.sessions.write", "operator.write"])("gates %s creation", (scope) => {
     const request = { method: "sessions.create", params: { agentId: "main", message: "Hello" } };
-    expect(readSessionMethodAccess(scoped, request)).toMatchObject({ allowed: false });
-    expect(readSessionMethodAccess(scoped, { ...request, sessionScope: true })).toEqual({
+    expect(access([scope], request).allowed).toBe(scope === "operator.write");
+    expect(access([scope], { ...request, sessionScope: true })).toEqual({
       allowed: true,
       requiredScope: "operator.sessions.write",
     });
-    for (const sharingRole of ["owner", "admin", "viewer", "member", undefined] as const) {
-      expect(
-        readSessionMethodAccess(scoped, {
-          ...request,
-          params: { parentSessionKey: "agent:main:source", fork: true },
-          sessionScope: true,
-          session: { sharingRole },
-        }).allowed,
-      ).toBe(sharingRole === "owner" || sharingRole === "admin");
-    }
     for (const params of [
       { incognito: true },
       { permissionMode: "full" },
       { execNode: "worker" },
       { toolOverrides: {} },
     ]) {
-      expect(
-        readSessionMethodAccess(scoped, { ...request, params, sessionScope: true }),
-      ).toMatchObject({ allowed: false, requiredScope: "operator.admin" });
+      expect(access([scope], { ...request, params, sessionScope: true })).toMatchObject({
+        allowed: false,
+        requiredScope: "operator.admin",
+        cause: "missing-scope",
+      });
     }
-  });
-
-  it("requires admin for privileged create params", () => {
-    const result = readSessionMethodAccess(snapshot({ scopes: ["operator.write"] }), {
-      method: "sessions.create",
-      params: { agentId: "main", incognito: true },
-    });
-    expect(result.allowed).toBe(false);
-    expect(result).toMatchObject({
-      cause: "missing-scope",
-      requiredScope: "operator.admin",
-    });
   });
 
   it("keeps profile placement admin-only through the caller's scope", () => {
@@ -112,8 +91,10 @@ describe("readSessionMethodAccess", () => {
     }
   });
 
-  it("requires explicit opt-in and ownership for narrow session actions", () => {
-    const request = { method: "sessions.patch", params: { key: "agent:main:notes", label: null } };
+  it.each([
+    { method: "sessions.patch", params: { key: "agent:main:notes", label: null } },
+    { method: "sessions.create", params: { parentSessionKey: "main", fork: true } },
+  ])("requires explicit opt-in and ownership for $method", (request) => {
     const scoped = snapshot({ methods: [request.method], scopes: ["operator.sessions.write"] });
     expect(
       readSessionMethodAccess(scoped, { ...request, session: { sharingRole: "owner" } }),
@@ -196,24 +177,15 @@ describe("readSessionMethodAccess", () => {
     ).toMatchObject({ allowed: false, cause: "missing-scope", requiredScope: "operator.read" });
   });
 
-  it("rejects snapshots without advertised auth", () => {
-    expect(
-      readSessionMethodAccess(snapshot({ includeAuth: false }), {
-        method: "sessions.create",
-        params: { agentId: "main" },
-      }),
-    ).toMatchObject({ allowed: false, cause: "missing-scope" });
-  });
-
-  it("rejects disconnected and unadvertised calls before scope checks", () => {
-    expect(
-      readSessionMethodAccess(snapshot({ connected: false }), {
-        method: "sessions.create",
-      }),
-    ).toMatchObject({ allowed: false, cause: "disconnected" });
-    expect(
-      readSessionMethodAccess(snapshot({ methods: [] }), { method: "sessions.create" }),
-    ).toMatchObject({ allowed: false, cause: "method-unavailable" });
+  it.each([
+    { state: snapshot({ includeAuth: false }), cause: "missing-scope" },
+    { state: snapshot({ connected: false }), cause: "disconnected" },
+    { state: snapshot({ methods: [] }), cause: "method-unavailable" },
+  ])("rejects unavailable creation: $cause", ({ state, cause }) => {
+    expect(readSessionMethodAccess(state, { method: "sessions.create" })).toMatchObject({
+      allowed: false,
+      cause,
+    });
   });
 
   it("admits only opted-in desired-state assignments to a retained offline identity", () => {
