@@ -29,33 +29,23 @@ import {
 } from "./payloads.test-helpers.js";
 
 describe("buildEmbeddedRunPayloads tool-error silence", () => {
-  it.each([
-    { text: "NO_REPLY", mutatingAction: false },
-    { text: "NO_REPLY", mutatingAction: true },
-    { text: "NO_REPLY", mutatingAction: undefined },
-  ])(
-    "suppresses authored silence: $text, mutatingAction=$mutatingAction",
-    ({ text, mutatingAction }) => {
-      const payloads = buildPayloads({
-        assistantTexts: [text],
-        lastToolError: {
-          toolName: "codex_apps.slack.slack_read_thread",
-          error: "429 RATE_LIMITED",
-          mutatingAction,
-        },
-      });
-      expect(payloads).toHaveLength(0);
+  it.each([false, true, undefined])(
+    "suppresses authored silence (mutatingAction=%s)",
+    (mutatingAction) => {
+      const lastToolError = {
+        toolName: "codex_apps.slack.slack_read_thread",
+        error: "429",
+        mutatingAction,
+      };
+      expect(buildPayloads({ assistantTexts: ["NO_REPLY"], lastToolError })).toHaveLength(0);
     },
   );
 
   it("does not append a bash warning after the agent edits its Slack answer and finishes silently", () => {
-    const assistant = makeAgentAssistantMessage({
-      content: [{ type: "text", text: "NO_REPLY" }],
-    });
     expect(
       buildPayloads({
         assistantTexts: ["NO_REPLY"],
-        lastAssistant: assistant,
+        lastAssistant: makeAgentAssistantMessage({ content: [{ type: "text", text: "NO_REPLY" }] }),
         didSendViaMessagingTool: true,
         lastToolError: {
           toolName: "bash",
@@ -67,43 +57,36 @@ describe("buildEmbeddedRunPayloads tool-error silence", () => {
     ).toHaveLength(0);
   });
 
-  it.each([
-    { name: "a scheduled run", mutatingAction: false, isCronTrigger: true },
-    { name: "an aborted run", mutatingAction: false, runAborted: true },
+  it.each<{
+    name: string;
+    assistantTexts?: string[];
+    isCronTrigger?: true;
+    runAborted?: true;
+    outcome?: "no_change" | "progress";
+  }>([
+    { name: "a run without an answer", assistantTexts: [] },
+    { name: "a scheduled run", isCronTrigger: true },
+    { name: "an aborted run", runAborted: true },
+    { name: "a scheduled no_change result", isCronTrigger: true, outcome: "no_change" },
+    { name: "a scheduled progress summary", isCronTrigger: true, outcome: "progress" },
   ])(
-    "keeps failure reporting for $name despite NO_REPLY",
-    ({ name: _name, mutatingAction, ...run }) => {
-      expectSingleToolErrorPayload(
-        buildPayloads({
-          ...run,
-          assistantTexts: ["NO_REPLY"],
-          lastToolError: { toolName: "read", error: "failed", mutatingAction },
-        }),
-        { title: "Read" },
-      );
-    },
-  );
-
-  it.each([
-    { result: { outcome: "progress" as const, summary: "Published the CI repair." }, warns: false },
-    { result: { outcome: "no_change" as const }, warns: true },
-  ])(
-    "treats a scheduled run's $result.outcome result as its outcome only when meaningful",
-    ({ result, warns }) => {
-      const runId = `cron-${result.outcome}`;
-      const claim = claimAgentRunContext(
-        runId,
-        { cronRunsByJobId: new Map([["job", { nextCheckEnabled: true, result }]]) },
-        { trackOwner: true, ownsContext: true },
-      );
-      onTestFinished(() => releaseAgentRunContext(runId, claim));
-      const payloads = buildPayloads({
-        runId,
-        isCronTrigger: true,
-        assistantTexts: ["NO_REPLY"],
-        lastToolError: { toolName: "agents_wait", error: "not_found", mutatingAction: false },
+    "reports a NO_REPLY tool failure for $name unless a summary covers it",
+    ({ name, outcome, assistantTexts = ["NO_REPLY"], ...run }) => {
+      const result = outcome && { outcome, summary: "Published the CI repair." };
+      const claim = claimAgentRunContext(name, {
+        cronRunsByJobId: new Map([["job", { nextCheckEnabled: true, result }]]),
       });
-      expect(payloads).toHaveLength(warns ? 1 : 0);
+      onTestFinished(() => releaseAgentRunContext(name, claim));
+      const lastToolError = { toolName: "read", error: "failed", mutatingAction: false };
+      const payloads = buildPayloads({
+        ...run,
+        runId: name,
+        assistantTexts,
+        lastToolError,
+      });
+      expect(payloads.map((payload) => payload.text)).toEqual(
+        outcome === "progress" ? [] : ["⚠️ Read failed"],
+      );
     },
   );
 
@@ -118,18 +101,6 @@ describe("buildEmbeddedRunPayloads tool-error silence", () => {
       { title: "Read" },
     );
   });
-
-  it.each([false, true, undefined])(
-    "still warns without an answer (mutatingAction=%s)",
-    (mutatingAction) => {
-      expectSingleToolErrorPayload(
-        buildPayloads({
-          lastToolError: { toolName: "read", error: "failed", mutatingAction },
-        }),
-        { title: "Read" },
-      );
-    },
-  );
 });
 
 describe("buildEmbeddedRunPayloads", () => {

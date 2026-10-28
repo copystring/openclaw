@@ -796,33 +796,21 @@ describe("agents_wait", () => {
     });
   });
 
-  it("marks entirely missing collector batches as failures without losing per-id errors", async () => {
-    const tool = createMainSessionWaitTool();
-
-    const result = await tool.execute("call", { ids: ["missing"], timeoutSeconds: 0 });
-
+  it("fails missing batches and points owned announcing children to completion", async () => {
+    records.set("announcing", { ...collectorRun("announcing", MAIN), collect: undefined });
+    records.set("plain", { ...collectorRun("plain", "agent:other:main"), collect: undefined });
+    await expect(executeWait(["announcing"])).rejects.toThrow("report back to this session");
+    const result = await executeWait(["missing", "plain"]);
     expect(result.details).toEqual({
       completed: [],
       pending: [],
-      errors: [{ runId: "missing", error: "not_found" }],
+      errors: [
+        { runId: "missing", error: "not_found" },
+        { runId: "plain", error: "not_found" },
+      ],
       success: false,
     });
     expect(isToolResultError(result)).toBe(true);
-  });
-
-  it("points an owned announcing child to its completion message instead of not_found", async () => {
-    records.set("announcing", { ...collectorRun("announcing", MAIN), collect: undefined });
-    records.set("foreign", { ...collectorRun("foreign", "agent:other:main"), collect: undefined });
-
-    await expect(executeWait(["announcing"])).rejects.toThrow(
-      "announcing will report back to this session as a completion message",
-    );
-    expect((await executeWait(["foreign"])).details).toEqual({
-      completed: [],
-      pending: [],
-      errors: [{ runId: "foreign", error: "not_found" }],
-      success: false,
-    });
   });
 
   it.each([
