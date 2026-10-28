@@ -1,0 +1,55 @@
+name: Keepalive CLI proof
+
+on:
+  push:
+    branches: [proof/keepalive-cli-186689]
+    paths:
+      - .github/workflows/keepalive-cli-proof.yml
+      - proof/keepalive-cli-proof.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Read proof driver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: driver
+          sparse-checkout: proof
+          persist-credentials: false
+      - name: Read exact PR source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: copystring/openclaw
+          ref: bc5df53d2662ddb7f53d9b178fd755e9ddc059fe
+          path: repo
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 26
+      - name: Install frozen dependencies
+        working-directory: repo
+        run: |
+          test "$(git rev-parse HEAD)" = bc5df53d2662ddb7f53d9b178fd755e9ddc059fe
+          npm install --global pnpm@12.15.0
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build shipped runtime
+        working-directory: repo
+        run: pnpm build:runtime
+      - name: Run isolated CLI and inspect persisted attribution
+        run: node driver/proof/keepalive-cli-proof.mjs "$GITHUB_WORKSPACE/repo" "$RUNNER_TEMP/keepalive-proof"
+      - name: Publish selected synthetic evidence
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: keepalive-cli-proof
+          path: |
+            ${{ runner.temp }}/keepalive-proof/results.json
+            ${{ runner.temp }}/keepalive-proof/requests.json
+          if-no-files-found: error
+          retention-days: 30
