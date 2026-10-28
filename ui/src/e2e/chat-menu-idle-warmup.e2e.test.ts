@@ -97,7 +97,7 @@ suite.define(() => {
               }
               return Date.now() - quietSince;
             },
-            { timeout: 15_000, intervals: [100] },
+            { timeout: 15_000, interval: 100 },
           )
           .toBeGreaterThan(1_500);
         const loadingRows = await countLoadingRows(page);
