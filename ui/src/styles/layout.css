@@ -1149,14 +1149,18 @@ html.openclaw-native-desktop .shell:not(.shell--mobile-nav) {
   color: var(--text);
 }
 
-/* Personal groups has a static heading, not a draggable session row. */
-.personal-session-groups__heading:hover,
-.personal-session-groups__heading .sidebar-session-toolbar__button:is(:hover, :focus-visible) {
-  background: transparent;
+/* The section icon distinguishes personal sections from shared groups. */
+.personal-session-groups__icon {
+  display: inline-flex;
+  flex: none;
+  /* Sit closer to the label than the row's standard gap. */
+  margin-inline-end: -3px;
+  color: var(--muted);
 }
 
-.personal-session-groups__heading .sidebar-session-toolbar__button {
-  margin-inline-start: auto;
+.personal-session-groups__icon svg {
+  width: 12px;
+  height: 12px;
 }
 
 .sidebar-recent-sessions__head--draggable {
@@ -2115,12 +2119,16 @@ html.openclaw-native-desktop .shell:not(.shell--mobile-nav) {
   }
 
   .sidebar-online__list {
-    grid-template-columns: 20px minmax(0, 1fr) 32px max-content;
+    grid-template-columns: max-content minmax(0, 1fr) 32px max-content;
   }
 
   .sidebar-online__menu-trigger.oc-menu-trigger {
     width: 32px;
     height: 40px;
+  }
+
+  .sidebar-online__menu-trigger svg {
+    display: block;
   }
 }
 
@@ -2286,6 +2294,7 @@ html.openclaw-native-desktop .shell:not(.shell--mobile-nav) {
 
 @media (hover: none), (pointer: coarse) {
   .sidebar-online__person {
+    align-items: center;
     min-height: 44px;
   }
 }

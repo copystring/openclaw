@@ -1,1 +1,4 @@
-6300786
+# Preserve upstream regression coverage and 351 net lines of browser relay regression tests.
+# Exact merged test total: 6,300,786 + 11,160 upstream lines = 6,311,946.
+# Counting and CI rules remain unchanged.
+6311946

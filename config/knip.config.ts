@@ -34,18 +34,29 @@ const repositoryScriptEntries = [
   // Spawned directly by native-allocation-profile.test.ts.
   "test/scripts/fixtures/native-profile-census.mjs!",
   // Their source headers document standalone benchmark and measurement commands.
+  "scripts/bench-android-release-history.mts!",
   "scripts/bench-duplicate-paragraphs.mts!",
+  "scripts/perf/anthropic-request-construction.ts!",
   "scripts/perf/auth-file-watch-events-measure.ts!",
+  "scripts/perf/catalog-worker-churn-measure.mjs!",
   "scripts/perf/completion-payload-bytes-measure.ts!",
   "scripts/perf/connect-profile-binding-measure.ts!",
   "scripts/perf/cron-reader-reuse-measure.ts!",
   "scripts/perf/cron-registry-read-measure.ts!",
+  "scripts/perf/doctor-session-manifests.ts!",
+  "scripts/perf/inspection-read-admission.ts!",
   "scripts/perf/local-workspace-refresh-measure.ts!",
+  "scripts/perf/node-worker-churn-measure.mjs!",
   "scripts/perf/plugin-state-claims-measure.ts!",
+  "scripts/perf/schema-crossing-measure.ts!",
   "scripts/perf/session-append-reload-measure.ts!",
   "scripts/perf/session-membership-retention-measure.ts!",
   "scripts/perf/session-message-custody-payload-measure.mjs!",
   "scripts/perf/session-patch-response-measure.ts!",
+  "scripts/perf/tool-loop-outcome-measure.ts!",
+  "scripts/perf/tool-search-snapshot-measure.ts!",
+  "scripts/perf/trajectory-record-event-measure.ts!",
+  "scripts/perf/transcript-json-array-measure.mjs!",
   "scripts/perf/transcript-pool-idle-measure.ts!",
   "scripts/perf/worktree-creation-measure.ts!",
   // The source header documents this matched Code Mode engine probe by path.
@@ -889,10 +900,12 @@ const repositoryScriptEntries = [
   "scripts/perf/connect-tail-measure.ts!",
   "scripts/perf/device-token-snapshot-measure.ts!",
   "scripts/perf/paired-row-encoding-measure.ts!",
+  "scripts/perf/patch-file-read-measure.ts!",
   "scripts/perf/session-patch-projection-measure.ts!",
   "scripts/perf/session-actor-writer-append-measure.ts!",
   "scripts/perf/session-cost-usage-cold-read.ts!",
   "scripts/perf/worker-warm-floor-measure.mjs!",
+  "scripts/perf/workspace-root-measure.ts!",
   "scripts/perf/worktree-branches-measure.ts!",
   // connect-tail-measure.ts loads this diagnostics preload through --gateway-preload.
   "scripts/perf/connect-tail-preload.mjs!",
@@ -1158,8 +1171,8 @@ const repositoryScriptEntries = [
   "scripts/write-unified-entry-dts.ts!",
   "security/opengrep/check-rule-metadata.mjs!",
   "security/opengrep/compile-rules.mjs!",
-  // create-claw/SKILL.md invokes this CLI bridge for skills and plugin inventory.
-  "skills/create-claw/scripts/cli.mjs!",
+  // create-template/SKILL.md invokes this CLI bridge for skills and plugin inventory.
+  "skills/create-template/scripts/cli.mjs!",
   "skills/meme-maker/scripts/meme.mjs!",
 ] as const;
 
