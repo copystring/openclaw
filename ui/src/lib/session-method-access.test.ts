@@ -34,7 +34,7 @@ function access(scopes: string[], request: SessionMethodAccessRequest) {
 }
 
 describe("readSessionMethodAccess", () => {
-  it("admits ordinary scoped creation before an owned row exists", () => {
+  it("requires source ownership only for parented scoped creation", () => {
     const scoped = snapshot({ scopes: ["operator.sessions.write"] });
     const request = { method: "sessions.create", params: { agentId: "main", message: "Hello" } };
     expect(readSessionMethodAccess(scoped, request)).toMatchObject({ allowed: false });
@@ -42,6 +42,16 @@ describe("readSessionMethodAccess", () => {
       allowed: true,
       requiredScope: "operator.sessions.write",
     });
+    for (const sharingRole of ["owner", "admin", "viewer", "member", undefined] as const) {
+      expect(
+        readSessionMethodAccess(scoped, {
+          ...request,
+          params: { parentSessionKey: "agent:main:source", fork: true },
+          sessionScope: true,
+          session: { sharingRole },
+        }).allowed,
+      ).toBe(sharingRole === "owner" || sharingRole === "admin");
+    }
     for (const params of [
       { incognito: true },
       { permissionMode: "full" },
