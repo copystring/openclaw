@@ -1,4 +1,5 @@
 import { materializeErrorStack } from "openclaw/plugin-sdk/error-runtime";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { sleepWithAbort } from "openclaw/plugin-sdk/retry-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/security-runtime";
 import type { SsrFPolicy } from "openclaw/plugin-sdk/security-runtime";
@@ -18,13 +19,14 @@ import {
 import { getChromeWebSocketEndpoint } from "./chrome.js";
 import { resolveBrowserEngine } from "./engines/registry.js";
 import type { BrowserEngineId } from "./engines/types.js";
-import { BrowserTabNotFoundError } from "./errors.js";
+import { BrowserActionError, BrowserTabNotFoundError } from "./errors.js";
 import type { RelayOperationReference } from "./extension-relay/owner-client.js";
 import {
   connectRelayBrowser,
   closeRelayOperationConnection,
+  RELAY_PLAYWRIGHT_TIMEOUT_MS,
 } from "./extension-relay/owner-playwright.js";
-import { getBorrowedRelayCdpAccess } from "./extension-relay/relay-access.js";
+import { getRelayCdpAccess } from "./extension-relay/relay-access.js";
 import { connectOverCdpTransport, UnresponsiveCdpTargetError } from "./pw-session-cdp-transport.js";
 import {
   blockedPageRefsByCdpUrl,
@@ -346,7 +348,8 @@ export async function connectBrowser(
   engine?: BrowserEngineId,
 ): Promise<ConnectedBrowser> {
   const normalized = normalizeCdpUrl(cdpUrl);
-  const relay = getBorrowedRelayCdpAccess(normalized);
+  const relayAccess = getRelayCdpAccess(normalized);
+  const relay = relayAccess?.ownership === "borrowed" ? relayAccess : undefined;
   if (relayReference) {
     if (!relay) {
       throw new Error("Captured relay connection is unavailable");
@@ -427,6 +430,7 @@ export async function connectBrowser(
                 lookup,
                 resolveWebSocketUrl,
                 ...(engine ? { engine } : {}),
+                deferInitialAutoAttach: Boolean(relayAccess),
               });
             }),
           );
@@ -436,7 +440,7 @@ export async function connectBrowser(
           browser = relay
             ? await connectRelayBrowser(relay, normalized)
             : await connectEndpoint(endpointUrl, endpointLookup);
-          if (relay && getBorrowedRelayCdpAccess(normalized) !== relay) {
+          if (relayAccess && getRelayCdpAccess(normalized) !== relayAccess) {
             await browser.close();
             throw new Error("Relay connection was superseded");
           }
@@ -466,7 +470,7 @@ export async function connectBrowser(
         }
         // Relay connections drive the user's visible Chrome, which shows its own dialogs.
         const headless =
-          !relay && engineAdapter.descriptor.id === "chromium"
+          !relayAccess && engineAdapter.descriptor.id === "chromium"
             ? await isHeadlessChromium(browser)
             : false;
         observeBrowser(browser);
@@ -490,7 +494,7 @@ export async function connectBrowser(
         return connected;
       } catch (err) {
         lastErr = err;
-        if (relay) {
+        if (relayAccess) {
           break;
         }
         // Don't retry rate-limit errors; retrying worsens the 429.
@@ -551,6 +555,62 @@ async function getAccessiblePages(opts: {
   return accessible;
 }
 
+async function waitForRelayPages(browser: Browser, cdpUrl: string, targetId?: string) {
+  const contexts = browser.contexts();
+  let publication = createDeferred<void>();
+  let disconnected = false;
+  let finished = false;
+  const wake = () => publication.resolve();
+  const onDisconnected = () => {
+    disconnected = true;
+    wake();
+  };
+  for (const context of contexts) {
+    context.on("page", wake);
+  }
+  browser.on("disconnected", onDisconnected);
+  try {
+    return await raceWithTimeout(
+      (async () => {
+        for (;;) {
+          if (finished) {
+            throw new Error("Page initialization wait ended.");
+          }
+          const changed = publication;
+          if (disconnected || !browser.isConnected()) {
+            throw new Error("Browser disconnected while waiting for page initialization.");
+          }
+          const accessible = await getAccessiblePages({
+            cdpUrl,
+            pages: await getAllPages(browser),
+          });
+          if (accessible.some((entry) => !targetId || entry.targetId === targetId)) {
+            return accessible;
+          }
+          await changed.promise;
+          if (publication === changed) {
+            publication = createDeferred<void>();
+          }
+        }
+      })(),
+      RELAY_PLAYWRIGHT_TIMEOUT_MS,
+      () => {
+        throw new BrowserActionError(
+          `Browser tab ${JSON.stringify(targetId ?? "requested")} did not become ready. Retry this tab after it responds.`,
+          409,
+        );
+      },
+    );
+  } finally {
+    finished = true;
+    wake();
+    for (const context of contexts) {
+      context.off("page", wake);
+    }
+    browser.off("disconnected", onDisconnected);
+  }
+}
+
 async function getPageForTargetIdOnce(opts: {
   cdpUrl: string;
   targetId?: string;
@@ -566,14 +626,14 @@ async function getPageForTargetIdOnce(opts: {
     opts.relayReference,
   );
   const pages = await getAllPages(browser);
-  if (!pages.length) {
+  const relay = getRelayCdpAccess(normalizeCdpUrl(opts.cdpUrl));
+  if (!pages.length && !relay) {
     throw new Error("No pages available in the connected browser.");
   }
 
-  const accessible = await getAccessiblePages({
-    cdpUrl: opts.cdpUrl,
-    pages,
-  });
+  const accessible = relay
+    ? await waitForRelayPages(browser, opts.cdpUrl, opts.targetId)
+    : await getAccessiblePages({ cdpUrl: opts.cdpUrl, pages });
   if (!accessible.length) {
     throw new BlockedBrowserTargetError();
   }

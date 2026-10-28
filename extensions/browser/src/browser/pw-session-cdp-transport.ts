@@ -60,6 +60,8 @@ type CdpTransportOptions = {
   lookup?: CdpSocketLookup;
   resolveWebSocketUrl?: () => Promise<string | undefined>;
   preparedTransport?: ConnectOverCDPTransport;
+  /** Connect the relay browser before waiting for individual renderer initialization. */
+  deferInitialAutoAttach?: boolean;
   engine?: BrowserEngineId;
 };
 
@@ -127,6 +129,7 @@ export async function connectOverCdpTransport(
   const pageTargetIdsBySession = new Map<string, string>();
   const pendingTargetCommands = new Map<number, string>();
   let trackInitializationCommands = true;
+  let initialAutoAttach: Record<string, unknown> | undefined;
   try {
     let onMessage: ((message: object) => void) | undefined;
     let onClose: ((reason?: string) => void) | undefined;
@@ -136,6 +139,7 @@ export async function connectOverCdpTransport(
     let closingReason: string | undefined;
     let transportCloseScheduled = false;
     let nextInternalCommandId = FIRST_INTERNAL_COMMAND_ID;
+    let pendingAutoAttachId: number | undefined;
     const pendingContextlessTargetResumes = new Map<number, string>();
     const notifyTransportClosed = (reason: string) => {
       if (transportClosed) {
@@ -208,7 +212,7 @@ export async function connectOverCdpTransport(
     const transport: ConnectOverCDPTransport = {
       send: (message) => {
         if (closingReason || transportClosed) {
-          throw new Error("CDP transport closed");
+          throw new Error(closingReason ?? "CDP transport closed");
         }
         const command = asOptionalRecord(message);
         const id = command?.id;
@@ -217,7 +221,19 @@ export async function connectOverCdpTransport(
           pendingTargetCommands.set(id, sessionId);
         }
         try {
-          wire.send(normalizer?.send(message) ?? message);
+          let outgoing = message;
+          if (
+            opts.deferInitialAutoAttach &&
+            trackInitializationCommands &&
+            !initialAutoAttach &&
+            !sessionId &&
+            command?.method === "Target.setAutoAttach" &&
+            asOptionalRecord(command.params)?.autoAttach === true
+          ) {
+            initialAutoAttach = asOptionalRecord(command.params);
+            outgoing = { ...command, params: { ...initialAutoAttach, autoAttach: false } };
+          }
+          wire.send(normalizer?.send(outgoing) ?? outgoing);
         } catch (error) {
           if (typeof id === "number") {
             pendingTargetCommands.delete(id);
@@ -270,6 +286,15 @@ export async function connectOverCdpTransport(
           }
           const id = parsed.id;
           if (typeof id === "number" && id <= FIRST_INTERNAL_COMMAND_ID) {
+            if (id === pendingAutoAttachId) {
+              pendingAutoAttachId = undefined;
+              const error = asOptionalRecord(parsed.error);
+              if (error) {
+                closeTransportSocket(
+                  `Relay page attachment failed: ${readStringField(error, "message") ?? "CDP command rejected"}`,
+                );
+              }
+            }
             const targetSessionId = pendingContextlessTargetResumes.get(id);
             if (targetSessionId) {
               pendingContextlessTargetResumes.delete(id);
@@ -326,6 +351,12 @@ export async function connectOverCdpTransport(
     trackInitializationCommands = false;
     pageTargetIdsBySession.clear();
     pendingTargetCommands.clear();
+    if (initialAutoAttach) {
+      // Keep the public relay's attachment barrier. Playwright now owns a usable
+      // Browser, so each Page can become ready without blocking its neighbours.
+      pendingAutoAttachId = nextInternalCommandId;
+      sendInternalCommand("Target.setAutoAttach", initialAutoAttach);
+    }
     return browser;
   } catch (error) {
     normalizer?.clear();
