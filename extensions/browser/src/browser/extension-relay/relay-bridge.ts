@@ -8,6 +8,7 @@ import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { isSelectableCdpBrowserTarget } from "../cdp-target-filter.js";
 import { resolveCreateTargetParams } from "./create-target-params.js";
 import { resolveExtensionRelayCommandTimeoutMs } from "./relay-command-timeout.js";
+import { isPermanentChromePageRefusal } from "./relay-page-refusal.js";
 import {
   type ExtensionToRelayMessage,
   parseExtensionMessage,
@@ -26,27 +27,6 @@ const EXTENSION_HELLO_TIMEOUT_MS = 10_000;
 const BROWSER_TARGET_ID = "openclaw-extension-relay";
 /** Playwright requires every attached page target to identify its browser context. */
 const BROWSER_CONTEXT_ID = "openclaw-extension-context";
-
-function isPermanentChromePageRefusal(error: unknown): error is Error {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return [
-    "The extensions gallery cannot be scripted.",
-    "Cannot access a chrome:// URL",
-    "Cannot access a chrome-extension:// URL of different extension",
-  ].some(
-    (reason) =>
-      error.message === reason ||
-      // Store extensions stringify the acquisition cause when native cleanup
-      // also fails. Keep that cleanup debt, but do not let its envelope hide
-      // Chrome's refusal from discovery. A refusal only in cleanup is not enough.
-      error.message.startsWith(
-        `Debugger acquisition failed: Error: ${reason}; cleanup incomplete: `,
-      ) ||
-      error.message === `Debugger cleanup incomplete: Error: ${reason}`,
-  );
-}
 
 type BridgeSocket = {
   send: (data: string) => void;
@@ -1173,6 +1153,9 @@ export class ExtensionRelayBridge {
             },
             request.sessionId,
           );
+          // Explicit attachment resumes this client's interest after a detach.
+          // Clear only after successful attachment so auto-attach cannot race it.
+          client.detachedTabs.delete(found.tabId);
           this.respond(client, request, { sessionId });
         });
         return;

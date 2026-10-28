@@ -1,6 +1,10 @@
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { connectOverCdpTransport } from "./pw-session-cdp-transport.js";
+import {
+  connectOverCdpTransport,
+  reattachRelayPage,
+  RelayPageRecoveryTimeoutError,
+} from "./pw-session-cdp-transport.js";
 
 const connectOverCdpSpy = vi.spyOn(chromium, "connectOverCDP");
 
@@ -31,7 +35,160 @@ function mockPageInitializationFailure(
   }) as never);
 }
 
+async function connectDeferredRelay(
+  wire: import("playwright-core").ConnectOverCDPTransport,
+  browser: import("playwright-core").Browser,
+  assertCurrent = vi.fn(),
+) {
+  connectOverCdpSpy.mockImplementationOnce((async (value: unknown) => {
+    const transport = value as import("playwright-core").ConnectOverCDPTransport;
+    transport.send({
+      id: 41,
+      method: "Target.setAutoAttach",
+      params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+    });
+    wire.onmessage?.({ id: 41, result: {} });
+    wire.onmessage?.({
+      method: "Target.attachedToTarget",
+      params: {
+        sessionId: "old-session",
+        targetInfo: { targetId: "BUSY", type: "page", browserContextId: "default-context" },
+      },
+    });
+    return browser;
+  }) as never);
+  const connection = connectOverCdpTransport("http://127.0.0.1:18799", {
+    timeout: 1000,
+    headers: {},
+    preparedTransport: wire,
+    deferInitialAutoAttach: true,
+    assertCurrent,
+  });
+  return { browser: await connection, assertCurrent };
+}
+
 describe("Playwright CDP initialization diagnostics", () => {
+  it("reattaches one selected relay target on the existing transport and coalesces callers", async () => {
+    const wire: import("playwright-core").ConnectOverCDPTransport = {
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const browser = { close: vi.fn() } as unknown as import("playwright-core").Browser;
+    const connected = await connectDeferredRelay(wire, browser);
+
+    // A metadata lookup attaches a nested session for the same native target.
+    // It must not replace the root session that owns Playwright's Page.
+    wire.onmessage?.({
+      method: "Target.attachedToTarget",
+      sessionId: "metadata-parent",
+      params: {
+        sessionId: "metadata-session",
+        targetInfo: { targetId: "BUSY", type: "page", browserContextId: "default-context" },
+      },
+    });
+    wire.onmessage?.({
+      method: "Target.detachedFromTarget",
+      sessionId: "metadata-parent",
+      params: { sessionId: "metadata-session" },
+    });
+    await expect(reattachRelayPage(browser, "BUSY", 1000, true)).resolves.toBe(false);
+
+    const first = reattachRelayPage(browser, "BUSY", 1000);
+    const second = reattachRelayPage(browser, "BUSY", 1000);
+    const commands = vi.mocked(wire.send).mock.calls.map(
+      ([message]) =>
+        message as {
+          id: number;
+          method: string;
+          params?: Record<string, unknown>;
+        },
+    );
+    const detach = commands.find((command) => command.method === "Target.detachFromTarget");
+    expect(detach).toMatchObject({ params: { sessionId: "old-session" } });
+    expect(commands.filter((command) => command.method === "Target.detachFromTarget")).toHaveLength(
+      1,
+    );
+    wire.onmessage?.({
+      method: "Target.detachedFromTarget",
+      params: { sessionId: "old-session" },
+    });
+    wire.onmessage?.({ id: detach!.id, result: {} });
+    await Promise.resolve();
+    const attach = vi
+      .mocked(wire.send)
+      .mock.calls.map(([message]) => message as { id: number; method: string; params?: object })
+      .find((command) => command.method === "Target.attachToTarget");
+    expect(attach).toMatchObject({ params: { targetId: "BUSY", flatten: true } });
+    wire.onmessage?.({
+      method: "Target.attachedToTarget",
+      params: {
+        sessionId: "new-session",
+        targetInfo: { targetId: "BUSY", type: "page", browserContextId: "default-context" },
+      },
+    });
+    wire.onmessage?.({ id: attach!.id, result: { sessionId: "new-session" } });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(connected.assertCurrent).toHaveBeenCalled();
+    expect(wire.close).not.toHaveBeenCalled();
+    expect(connectOverCdpSpy).toHaveBeenCalledOnce();
+  });
+
+  it("rejects CDP errors and can continue after detach succeeds but attach times out", async () => {
+    const wire: import("playwright-core").ConnectOverCDPTransport = {
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const browser = { close: vi.fn() } as unknown as import("playwright-core").Browser;
+    await connectDeferredRelay(wire, browser);
+    const recovery = reattachRelayPage(browser, "BUSY", 10);
+    const detach = vi
+      .mocked(wire.send)
+      .mock.calls.map(([message]) => message as { id: number; method: string })
+      .find((command) => command.method === "Target.detachFromTarget");
+    wire.onmessage?.({
+      id: detach!.id,
+      error: { message: "Target session retired" },
+    });
+    await expect(recovery).rejects.toThrow("Target session retired");
+    expect(wire.close).not.toHaveBeenCalled();
+
+    vi.useFakeTimers();
+    const timedOut = reattachRelayPage(browser, "BUSY", 10);
+    const timedOutResult = expect(timedOut).rejects.toBeInstanceOf(RelayPageRecoveryTimeoutError);
+    const secondDetach = vi
+      .mocked(wire.send)
+      .mock.calls.map(([message]) => message as { id: number; method: string; params?: object })
+      .filter((command) => command.method === "Target.detachFromTarget")
+      .at(-1)!;
+    wire.onmessage?.({
+      method: "Target.detachedFromTarget",
+      params: { sessionId: "old-session" },
+    });
+    wire.onmessage?.({ id: secondDetach.id, result: {} });
+    await vi.advanceTimersByTimeAsync(10);
+    await timedOutResult;
+
+    const retry = reattachRelayPage(browser, "BUSY", 1000, true);
+    const commands = vi
+      .mocked(wire.send)
+      .mock.calls.map(([message]) => message as { id: number; method: string; params?: object });
+    expect(commands.filter((command) => command.method === "Target.detachFromTarget")).toHaveLength(
+      2,
+    );
+    const attach = commands.filter((command) => command.method === "Target.attachToTarget").at(-1)!;
+    wire.onmessage?.({
+      method: "Target.attachedToTarget",
+      params: {
+        sessionId: "recovered-session",
+        targetInfo: { targetId: "BUSY", type: "page", browserContextId: "default-context" },
+      },
+    });
+    wire.onmessage?.({ id: attach.id, result: { sessionId: "recovered-session" } });
+    await expect(retry).resolves.toBe(true);
+    vi.useRealTimers();
+  });
+
   it.each([
     { mode: "generic", defer: false, fail: false, rejectReplay: false },
     { mode: "borrowed relay", defer: true, fail: false, rejectReplay: false },
@@ -83,6 +240,9 @@ describe("Playwright CDP initialization diagnostics", () => {
       await expect(connection).rejects.toThrow("Timeout 1000ms exceeded");
     } else {
       await expect(connection).resolves.toBe(browser);
+      if (!defer) {
+        await expect(reattachRelayPage(browser, "BUSY")).resolves.toBe(false);
+      }
     }
 
     expect(sendWire).toHaveBeenCalledTimes(defer && !fail ? 2 : 1);

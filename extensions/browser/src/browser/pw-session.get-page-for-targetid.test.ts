@@ -8,6 +8,7 @@ import type { RelayOwnerClient } from "./extension-relay/owner-client.js";
 import { registerRelayCdpAccess } from "./extension-relay/relay-access.js";
 import type { ExtensionRelayHandle } from "./extension-relay/relay-server.js";
 import { pwAi } from "./pw-ai.js";
+import * as cdpTransport from "./pw-session-cdp-transport.js";
 import { closeConnectionScopedPageBrowser, markTargetBlocked } from "./pw-session-connection.js";
 
 const {
@@ -165,9 +166,61 @@ afterEach(async () => {
 
 beforeEach(() => {
   getChromeWebSocketEndpointSpy.mockResolvedValue(null);
+  vi.mocked(cdpTransport.reattachRelayPage).mockReset().mockResolvedValue(false);
 });
 
 describe("pw-session getPageForTargetId", () => {
+  it.each(["borrowed", "owned"] as const)(
+    "reinitializes a failed %s Page without retiring its healthy neighbour",
+    async (ownership) => {
+      const failed = { targetId: "BUSY", url: "" };
+      const bundle = installBrowser([{ targetId: "HEALTHY", url: "about:blank" }, failed]);
+      const unregister = registerRelay(ownership);
+      vi.mocked(cdpTransport.reattachRelayPage).mockImplementation(async (_browser, targetId) => {
+        expect(targetId).toBe("BUSY");
+        failed.url = "https://recovered.example/";
+        bundle.publishPage(1);
+        return true;
+      });
+      try {
+        await expect(getPageForTargetId({ cdpUrl, targetId: "HEALTHY" })).resolves.toBe(
+          bundle.pages[0],
+        );
+        expect(cdpTransport.reattachRelayPage).not.toHaveBeenCalled();
+        await expect(getPageForTargetId({ cdpUrl, targetId: "BUSY" })).resolves.toBe(
+          bundle.pages[1],
+        );
+        expect(cdpTransport.reattachRelayPage).toHaveBeenCalledOnce();
+        await expect(getPageForTargetId({ cdpUrl, targetId: "HEALTHY" })).resolves.toBe(
+          bundle.pages[0],
+        );
+        expect(connectOverCdpSpy).toHaveBeenCalledOnce();
+        expect(bundle.browserClose).not.toHaveBeenCalled();
+      } finally {
+        unregister();
+      }
+    },
+  );
+
+  it("bounds recovery of a published failed Page instead of selecting its dummy frame", async () => {
+    vi.useFakeTimers();
+    const bundle = installBrowser([{ targetId: "BUSY", url: "" }]);
+    const unregister = registerRelay("owned");
+    vi.mocked(cdpTransport.reattachRelayPage).mockResolvedValue(true);
+    try {
+      const result = getPageForTargetId({ cdpUrl, targetId: "BUSY" }).catch(
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await result).toMatchObject({ status: 409 });
+      expect(cdpTransport.reattachRelayPage).toHaveBeenCalledOnce();
+      expect(bundle.browserClose).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+      await vi.runAllTimersAsync();
+    }
+  });
+
   it.each(["borrowed", "owned"] as const)(
     "keeps healthy %s relay selection usable while another Page is unpublished",
     async (ownership) => {

@@ -62,8 +62,37 @@ type CdpTransportOptions = {
   preparedTransport?: ConnectOverCDPTransport;
   /** Connect the relay browser before waiting for individual renderer initialization. */
   deferInitialAutoAttach?: boolean;
+  assertCurrent?: () => void;
   engine?: BrowserEngineId;
 };
+
+type RelayPageRecovery = (
+  targetId: string,
+  timeoutMs: number,
+  onlyIfDetached: boolean,
+) => Promise<boolean>;
+const relayPageRecoveryByBrowser = new WeakMap<Browser, RelayPageRecovery>();
+
+export class RelayPageRecoveryTimeoutError extends Error {
+  constructor(method: string) {
+    super(`Relay ${method} acknowledgement timed out`);
+    this.name = "RelayPageRecoveryTimeoutError";
+  }
+}
+
+/** Reattach one failed relay Page through its existing private browser transport. */
+export async function reattachRelayPage(
+  browser: Browser,
+  targetId: string,
+  timeoutMs = 5_000,
+  onlyIfDetached = false,
+): Promise<boolean> {
+  const recover = relayPageRecoveryByBrowser.get(browser);
+  if (!recover) {
+    return false;
+  }
+  return await recover(targetId, timeoutMs, onlyIfDetached);
+}
 
 async function openCdpTransportSocket(
   connectionUrl: string,
@@ -127,6 +156,7 @@ export async function connectOverCdpTransport(
   const normalizer = resolveBrowserEngine(opts.engine).createCdpNormalizer?.();
   const wire = opts.preparedTransport ?? (await openCdpTransportSocket(connectionUrl, opts));
   const pageTargetIdsBySession = new Map<string, string>();
+  const pageSessionsByTargetId = new Map<string, string>();
   const pendingTargetCommands = new Map<number, string>();
   let trackInitializationCommands = true;
   let initialAutoAttach: Record<string, unknown> | undefined;
@@ -141,11 +171,32 @@ export async function connectOverCdpTransport(
     let nextInternalCommandId = FIRST_INTERNAL_COMMAND_ID;
     let pendingAutoAttachId: number | undefined;
     const pendingContextlessTargetResumes = new Map<number, string>();
+    const pendingInternalCommands = new Map<
+      number,
+      {
+        resolve: (result: Record<string, unknown>) => void;
+        reject: (error: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >();
+    const recoveriesByTargetId = new Map<string, Promise<void>>();
+    const targetsNeedingReattach = new Set<string>();
+    const rejectPendingInternalCommands = (error: Error) => {
+      for (const [id, pending] of pendingInternalCommands) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+        pendingInternalCommands.delete(id);
+      }
+    };
     const notifyTransportClosed = (reason: string) => {
       if (transportClosed) {
         return;
       }
       transportClosed = true;
+      pageTargetIdsBySession.clear();
+      pageSessionsByTargetId.clear();
+      targetsNeedingReattach.clear();
+      rejectPendingInternalCommands(new Error(reason));
       normalizer?.clear();
       if (onClose) {
         onClose(reason);
@@ -165,6 +216,7 @@ export async function connectOverCdpTransport(
     };
     const closeTransportSocket = (reason = "CDP socket closed") => {
       closingReason = reason;
+      rejectPendingInternalCommands(new Error(reason));
       normalizer?.clear();
       // Borrowed streams close only after the real owner acknowledges native cleanup.
       wire.close();
@@ -177,6 +229,100 @@ export async function connectOverCdpTransport(
       const id = nextInternalCommandId--;
       wire.send({ id, method, ...(params ? { params } : {}), sessionId });
       return id;
+    };
+    const sendInternalCommandAndWait = (
+      method: string,
+      params: Record<string, unknown>,
+      timeoutMs: number,
+    ): Promise<Record<string, unknown>> =>
+      new Promise((resolve, reject) => {
+        const id = nextInternalCommandId--;
+        const timer = setTimeout(() => {
+          pendingInternalCommands.delete(id);
+          reject(new RelayPageRecoveryTimeoutError(method));
+        }, timeoutMs);
+        timer.unref?.();
+        pendingInternalCommands.set(id, { resolve, reject, timer });
+        try {
+          if (closingReason || transportClosed) {
+            throw new Error(closingReason ?? "CDP transport closed");
+          }
+          wire.send(normalizer?.send({ id, method, params }) ?? { id, method, params });
+        } catch (error) {
+          clearTimeout(timer);
+          pendingInternalCommands.delete(id);
+          const failure = new Error(formatErrorMessage(error));
+          reject(failure);
+          closeTransportSocket(failure.message);
+        }
+      });
+    const assertCurrent = opts.assertCurrent ?? (() => {});
+    const recoverRelayPage: RelayPageRecovery = async (
+      targetId,
+      requestedTimeoutMs,
+      onlyIfDetached,
+    ) => {
+      assertCurrent();
+      const normalizedTargetId = targetId.trim();
+      if (!normalizedTargetId) {
+        throw new Error("Relay target identity is required for Page recovery");
+      }
+      if (onlyIfDetached && !targetsNeedingReattach.has(normalizedTargetId)) {
+        return false;
+      }
+      const existing = recoveriesByTargetId.get(normalizedTargetId);
+      if (existing) {
+        await existing;
+        assertCurrent();
+        return true;
+      }
+      targetsNeedingReattach.add(normalizedTargetId);
+      const timeoutMs = Math.max(1, Math.floor(requestedTimeoutMs));
+      const recovery = (async () => {
+        assertCurrent();
+        if (closingReason || transportClosed) {
+          throw new Error(closingReason ?? "CDP transport closed");
+        }
+        const deadline = Date.now() + timeoutMs;
+        const remaining = () => {
+          const budget = deadline - Date.now();
+          if (budget <= 0) {
+            throw new RelayPageRecoveryTimeoutError("Target reattach");
+          }
+          return budget;
+        };
+        const sessionId = pageSessionsByTargetId.get(normalizedTargetId);
+        if (sessionId) {
+          await sendInternalCommandAndWait("Target.detachFromTarget", { sessionId }, remaining());
+          assertCurrent();
+          if (pageSessionsByTargetId.get(normalizedTargetId) === sessionId) {
+            pageSessionsByTargetId.delete(normalizedTargetId);
+            pageTargetIdsBySession.delete(sessionId);
+          }
+        }
+        const result = await sendInternalCommandAndWait(
+          "Target.attachToTarget",
+          { targetId: normalizedTargetId, flatten: true },
+          remaining(),
+        );
+        assertCurrent();
+        const replacementSessionId = readStringField(result, "sessionId");
+        if (!replacementSessionId) {
+          throw new Error("Relay did not return a session for the reattached target");
+        }
+        pageTargetIdsBySession.set(replacementSessionId, normalizedTargetId);
+        pageSessionsByTargetId.set(normalizedTargetId, replacementSessionId);
+        targetsNeedingReattach.delete(normalizedTargetId);
+      })();
+      recoveriesByTargetId.set(normalizedTargetId, recovery);
+      try {
+        await recovery;
+        return true;
+      } finally {
+        if (recoveriesByTargetId.get(normalizedTargetId) === recovery) {
+          recoveriesByTargetId.delete(normalizedTargetId);
+        }
+      }
     };
     const releaseContextlessTarget = (params: Record<string, unknown>) => {
       const sessionId = readStringField(params, "sessionId");
@@ -295,6 +441,19 @@ export async function connectOverCdpTransport(
                 );
               }
             }
+            const pending = pendingInternalCommands.get(id);
+            if (pending) {
+              pendingInternalCommands.delete(id);
+              clearTimeout(pending.timer);
+              const error = asOptionalRecord(parsed.error);
+              if (error) {
+                pending.reject(
+                  new Error(readStringField(error, "message") ?? "Relay CDP command rejected"),
+                );
+              } else {
+                pending.resolve(asOptionalRecord(parsed.result) ?? {});
+              }
+            }
             const targetSessionId = pendingContextlessTargetResumes.get(id);
             if (targetSessionId) {
               pendingContextlessTargetResumes.delete(id);
@@ -307,7 +466,11 @@ export async function connectOverCdpTransport(
           }
           const method = readStringField(parsed, "method");
           const params = asOptionalRecord(parsed.params);
-          if (trackInitializationCommands && method === "Target.attachedToTarget") {
+          if (
+            (trackInitializationCommands || opts.deferInitialAutoAttach) &&
+            !readStringField(parsed, "sessionId") &&
+            method === "Target.attachedToTarget"
+          ) {
             const sessionId = readStringField(params, "sessionId");
             const targetInfo = asOptionalRecord(params?.targetInfo);
             const targetId = readStringField(targetInfo, "targetId");
@@ -318,11 +481,20 @@ export async function connectOverCdpTransport(
               readStringField(targetInfo, "type") === "page"
             ) {
               pageTargetIdsBySession.set(sessionId, targetId);
+              pageSessionsByTargetId.set(targetId, sessionId);
             }
-          } else if (trackInitializationCommands && method === "Target.detachedFromTarget") {
+          } else if (
+            (trackInitializationCommands || opts.deferInitialAutoAttach) &&
+            !readStringField(parsed, "sessionId") &&
+            method === "Target.detachedFromTarget"
+          ) {
             const sessionId = readStringField(params, "sessionId");
             if (sessionId) {
+              const targetId = pageTargetIdsBySession.get(sessionId);
               pageTargetIdsBySession.delete(sessionId);
+              if (targetId && pageSessionsByTargetId.get(targetId) === sessionId) {
+                pageSessionsByTargetId.delete(targetId);
+              }
               for (const [commandId, pendingSessionId] of pendingTargetCommands) {
                 if (pendingSessionId === sessionId) {
                   pendingTargetCommands.delete(commandId);
@@ -349,8 +521,13 @@ export async function connectOverCdpTransport(
     // Target-command state diagnoses only the cold attach. Stop retaining
     // traffic once Playwright owns a usable browser for the cached session.
     trackInitializationCommands = false;
-    pageTargetIdsBySession.clear();
     pendingTargetCommands.clear();
+    if (opts.deferInitialAutoAttach) {
+      relayPageRecoveryByBrowser.set(browser, recoverRelayPage);
+    } else {
+      pageTargetIdsBySession.clear();
+      pageSessionsByTargetId.clear();
+    }
     if (initialAutoAttach) {
       // Keep the public relay's attachment barrier. Playwright now owns a usable
       // Browser, so each Page can become ready without blocking its neighbours.

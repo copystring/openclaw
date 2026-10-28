@@ -27,7 +27,12 @@ import {
   RELAY_PLAYWRIGHT_TIMEOUT_MS,
 } from "./extension-relay/owner-playwright.js";
 import { getRelayCdpAccess } from "./extension-relay/relay-access.js";
-import { connectOverCdpTransport, UnresponsiveCdpTargetError } from "./pw-session-cdp-transport.js";
+import {
+  connectOverCdpTransport,
+  reattachRelayPage,
+  RelayPageRecoveryTimeoutError,
+  UnresponsiveCdpTargetError,
+} from "./pw-session-cdp-transport.js";
 import {
   blockedPageRefsByCdpUrl,
   blockedTargetsByCdpUrl,
@@ -431,6 +436,13 @@ export async function connectBrowser(
                 resolveWebSocketUrl,
                 ...(engine ? { engine } : {}),
                 deferInitialAutoAttach: Boolean(relayAccess),
+                assertCurrent: relayAccess
+                  ? () => {
+                      if (getRelayCdpAccess(normalized) !== relayAccess) {
+                        throw new Error("Relay connection was superseded");
+                      }
+                    }
+                  : undefined,
               });
             }),
           );
@@ -560,6 +572,8 @@ async function waitForRelayPages(browser: Browser, cdpUrl: string, targetId?: st
   let publication = createDeferred<void>();
   let disconnected = false;
   let finished = false;
+  let recoveryAttempted = false;
+  const deadline = Date.now() + RELAY_PLAYWRIGHT_TIMEOUT_MS;
   const wake = () => publication.resolve();
   const onDisconnected = () => {
     disconnected = true;
@@ -584,8 +598,37 @@ async function waitForRelayPages(browser: Browser, cdpUrl: string, targetId?: st
             cdpUrl,
             pages: await getAllPages(browser),
           });
-          if (accessible.some((entry) => !targetId || entry.targetId === targetId)) {
-            return accessible;
+          // Playwright also publishes initialization failures, using a dummy main
+          // frame whose URL is empty. Such a Page is not ready for URL guards or
+          // actions; recreate only its logical session, keeping healthy peers.
+          const ready = accessible.filter(({ page }) => Boolean(page.url()));
+          if (ready.some((entry) => !targetId || entry.targetId === targetId)) {
+            return ready;
+          }
+          const failed = targetId && accessible.find((entry) => entry.targetId === targetId);
+          if (targetId && !recoveryAttempted) {
+            try {
+              if (
+                await reattachRelayPage(
+                  browser,
+                  targetId,
+                  Math.max(1, deadline - Date.now()),
+                  !failed,
+                )
+              ) {
+                recoveryAttempted = true;
+                continue;
+              }
+              recoveryAttempted = Boolean(failed);
+            } catch (error) {
+              if (!(error instanceof RelayPageRecoveryTimeoutError)) {
+                throw error;
+              }
+              throw new BrowserActionError(
+                `Browser tab ${JSON.stringify(targetId)} did not become ready. Retry this tab after it responds.`,
+                409,
+              );
+            }
           }
           await changed.promise;
           if (publication === changed) {

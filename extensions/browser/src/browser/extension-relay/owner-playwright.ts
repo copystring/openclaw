@@ -42,6 +42,12 @@ export async function connectRelayBrowser(
       headers: {},
       preparedTransport: transport,
       deferInitialAutoAttach: true,
+      assertCurrent: () => {
+        if (getRelayCdpAccess(cdpUrl) !== relay) {
+          throw new Error("Captured relay connection was superseded");
+        }
+        relay.client.assertCurrent();
+      },
     });
     try {
       if (getRelayCdpAccess(cdpUrl) !== relay || (reference && !(await reference.resolve()))) {
