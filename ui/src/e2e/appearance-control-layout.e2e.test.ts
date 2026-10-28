@@ -65,17 +65,18 @@ suite.define(() => {
           [320, 1],
         ] as const) {
           await page.setViewportSize({ height: 1000, width });
-          const layout = await grid.evaluate((element) => {
-            const cards = Array.from(element.children, (card) =>
-              (card as HTMLElement).getBoundingClientRect(),
-            );
-            return {
-              columns: new Set(cards.map((card) => Math.round(card.left))).size,
-              minWidth: Math.min(...cards.map((card) => card.width)),
-            };
-          });
-          expect(layout.columns).toBe(expectedColumns);
-          expect(layout.minWidth).toBeGreaterThanOrEqual(150);
+          const readLayout = () =>
+            grid.evaluate((element) => {
+              const cards = Array.from(element.children, (card) =>
+                (card as HTMLElement).getBoundingClientRect(),
+              );
+              return {
+                columns: new Set(cards.map((card) => Math.round(card.left))).size,
+                minWidth: Math.min(...cards.map((card) => card.width)),
+              };
+            });
+          await expect.poll(async () => (await readLayout()).columns).toBe(expectedColumns);
+          expect((await readLayout()).minWidth).toBeGreaterThanOrEqual(150);
         }
 
         const colorMode = page.locator(".settings-row").filter({
