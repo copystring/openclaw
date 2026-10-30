@@ -120,7 +120,7 @@ function lazyRuntimeModuleMemberEdges(source, consumerFile, targetSpecifier) {
         /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*createLazyRuntimeModule\(\s*\(\s*\)\s*=>\s*import\(\s*["']([^"'\r\n]+)["']\s*\)\s*,?\s*\)\s*;/gu,
       ),
     ]
-      .filter(([, , specifier]) => specifier === targetSpecifier)
+      .filter((match) => match[2] === targetSpecifier)
       .map(([, loader, specifier]) => [loader, specifier]),
   );
   const edges = new Map();
@@ -145,6 +145,30 @@ function lazyRuntimeModuleMemberEdges(source, consumerFile, targetSpecifier) {
     }
   }
 
+  const specifiersByBinder = new Map(
+    [
+      ...source.matchAll(
+        /^[ \t]*const\s+([A-Za-z_$][\w$]*)\s*=\s*createLazyRuntimeMethodBinder\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;/gmu,
+      ),
+    ].flatMap(([, binder, loader]) => {
+      const specifier = specifiersByLoader.get(loader);
+      return specifier ? [[binder, specifier]] : [];
+    }),
+  );
+  // The binder forwards only the method selected from its supplying module.
+  for (const match of source.matchAll(
+    /^[ \t]*[A-Za-z_$][\w$]*:\s*([A-Za-z_$][\w$]*)\(\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*=>\s*\2\.([A-Za-z_$][\w$]*)\s*\)[ \t]*,?[ \t]*$/gmu,
+  )) {
+    const specifier = specifiersByBinder.get(match[1]);
+    if (!specifier) {
+      continue;
+    }
+    const targetFile = path.resolve(path.dirname(consumerFile), specifier);
+    const names = edges.get(targetFile) ?? new Set();
+    names.add(match[3]);
+    edges.set(targetFile, names);
+  }
+
   return edges;
 }
 
@@ -155,10 +179,7 @@ function computedCheckoutNamespaceMemberEdges(source) {
         /\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*join\(\s*source\s*,\s*["']([^"'\r\n]+)["']\s*\)\s*;/gu,
       ),
     ]
-      .filter(
-        ([, , directory]) =>
-          !path.isAbsolute(directory) && !directory.split(/[\\/]/u).includes(".."),
-      )
+      .filter((match) => !path.isAbsolute(match[2]) && !match[2].split(/[\\/]/u).includes(".."))
       .map(([, binding, directory]) => [binding, directory]),
   );
   const edges = new Map();
@@ -431,7 +452,7 @@ export function compileDynamicConsumerEdges(source, filePath, scriptEntrypoints 
   const archiveChurnSource = fs.readFileSync(archiveChurnPath, "utf8");
   const archiveChurnLaunch =
     archiveChurnSource.match(
-      /^if \(values\.allocations\) \{([\s\S]*?)^\}\nconst inspector = new Session\(\);/mu,
+      /^if \(values\.allocations(?: \|\| values\.entry)?\) \{([\s\S]*?)^\}\nconst inspector = new Session\(\);/mu,
     )?.[1] ?? "";
   if (
     /^\s*const\s+preload\s*=\s*pathToFileURL\(\s*path\.join\(\s*path\.dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)\s*,\s*["']archive-worker-churn-preload\.mjs["']\s*\)\s*,\s*\)\.href\s*;/mu.test(
@@ -505,7 +526,7 @@ export function compileDynamicConsumerEdges(source, filePath, scriptEntrypoints 
     imports.push(namedImport([...names], targetFile, filePath, imports.length));
   }
 
-  const codexLazyConsumers = [
+  const lazyRuntimeConsumers = [
     ["extensions/codex/src/native-plugin-tool.ts", "./app-server/binding-connection.js"],
     ["extensions/codex/src/native-thread-tool.ts", "./app-server/binding-connection.js"],
     [
@@ -513,23 +534,25 @@ export function compileDynamicConsumerEdges(source, filePath, scriptEntrypoints 
       "./session-catalog-node-adoption.js",
     ],
     ["extensions/codex/src/session-catalog-control.ts", "./app-server/shared-client.js"],
+    ["src/plugins/runtime/index.ts", "../../tts/tts.js"],
+    ["src/plugins/runtime/index.ts", "../../tts/tts-request.js"],
   ];
-  const codexLazyEdges = new Map();
-  for (const [consumerPath, targetSpecifier] of codexLazyConsumers) {
+  const lazyRuntimeEdges = new Map();
+  for (const [consumerPath, targetSpecifier] of lazyRuntimeConsumers) {
     const consumerSource = fs.readFileSync(consumerPath, "utf8");
     for (const [targetFile, memberNames] of lazyRuntimeModuleMemberEdges(
       consumerSource,
       consumerPath,
       targetSpecifier,
     )) {
-      const names = codexLazyEdges.get(targetFile) ?? new Set();
+      const names = lazyRuntimeEdges.get(targetFile) ?? new Set();
       for (const name of memberNames) {
         names.add(name);
       }
-      codexLazyEdges.set(targetFile, names);
+      lazyRuntimeEdges.set(targetFile, names);
     }
   }
-  for (const [targetFile, names] of codexLazyEdges) {
+  for (const [targetFile, names] of lazyRuntimeEdges) {
     imports.push(namedImport([...names], targetFile, filePath, imports.length));
   }
 
